@@ -3,7 +3,7 @@ use warnings;
 use strict;
 use base 'Class::Accessor';
 use Carp qw/croak/;
-our $VERSION = '0.01';
+our $VERSION = '0.03';
 __PACKAGE__->mk_accessors(qw/user pass debug testing/);
 
 =head1 NAME
@@ -91,7 +91,7 @@ $sigs{regrade} = ["ref|telephone|username|service-id", "prod-id"];
 
 $sigs{care_level} = ["ref|telephone|username|service-id", "care-level"];
 
-$sigs{requestmac} = ["ref|telephone|username|service-id"];
+$sigs{request_mac} = ["ref|telephone|username|service-id"];
 
 $sigs{cease} = ["ref|telephone|username|service-id", "crd"];
 
@@ -149,8 +149,8 @@ and other Internet services, try UKFSN.
 Copyright 2009-2012 Simon Cozens & Jason Clifford
 
 This program is free software; you can redistribute it and/or modify it
-under the terms of either: the GNU General Public License as published
-by the Free Software Foundation; or the Artistic License.
+under the terms of either: version 2 of the GNU General Public License 
+as published by the Free Software Foundation; or the Artistic License.
 
 See http://dev.perl.org/licenses/ for more information.
 

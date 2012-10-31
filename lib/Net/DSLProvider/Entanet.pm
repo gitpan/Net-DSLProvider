@@ -1,9 +1,12 @@
-package Net::DSLProvider::Enta;
+package Net::DSLProvider::Entanet;
+
+# This replaces the Net::DSLProvider::Enta module
+
 use strict;
 use warnings;
 use HTML::Entities qw(encode_entities_numeric);
 use base 'Net::DSLProvider';
-use constant ENDPOINT => "https://partners.enta.net/";
+use constant ENDPOINT => "https://api.enta.net/xml/";
 use constant BOUNDARY => "abc123xyz890";
 use constant REALM => "Entanet Partner Logon";
 use LWP;
@@ -12,162 +15,292 @@ use XML::Simple;
 use Time::Piece;
 use Time::Seconds;
 use Date::Holidays::EnglandWales;
+__PACKAGE__->mk_accessors(qw/version/);
 
 # These are methods for which we have to pass Enta a block of XML as a file
 # via POST rather than simply using GET with the parameters and the fields 
 # in the XML are case sensitive while they are not when using GET
 
-my %enta_xml_methods = ( "ProductChange" => 1, 
-    "ModifyLineFeatures" => 1, "UpdateADSLContact" => 1,
-    "CreateADSLOrder" => 1 );
+my %requesttype = ( RequestAppointmentBook => "post", Poll => "post",
+    RequestAppointmentSlot => "post", ADSLChecker => "get", 
+    GetBlocked => "get", ModifyLineFeatures => "post", GetNotes => "get",
+    GetRateLimited => "get", AdslAccount => "get", GetBTFault => "get",
+    ListConnections => "get", CheckUsernameAvailable => "get",
+    GetAdslInstall => "get", PendingOrders => "get", GetBTFeed => "get",
+    PSTNPendingOrders => "get", LastRadiusLog => "get",
+    ConnectionHistory => "get", GetInterleaving => "get",
+    GetOpenADSLFaults => "get", RequestMAC => "get", ADSLTopup => "get",
+    UsageHistory => "get", GetMaxReports => "get", GetHeavyUsers => "get",
+    UpdateADSLPrice => "post", UpdateADSLContact => "post", 
+    GetADSLUsage => "get", CreateLLUOrder => "post",
+    CreateADSLOrder => "post", UsageHistoryDetail => "get"
+    );
 
-my %entatype = ( "CreateADSLOrder" => "ADSLOrder",
-    "ModifyLineFeatures" => "ModifyLineFeatures",
-    "UpdateADSLContact" => "UpdateADSLContact",
-    "ProductChange" => "ProductChange" );
+my %optional = ( 
+    UpdateADSLContact => {
+        Email => 1, TelDay => 1, TelEve => 1
+    },
+    UpdateADSLPrice => {
+        PeriodFee => 1, EnhancedCareFee => 1, ElevatedBestEffortsFee => 1
+    },
+    ModifyLineFeatures => {
+        LineFeatures => {
+            Interleaving => 1, StabilityOption => 1,
+            ElevatedBestEfforts => 1, ElevatedBestEffortsFee => 1,
+            MaintenanceCategory => 1, MaintenanceCategoryFee => 1,
+            Upstream => 1, UpstreamFee => 1
+        }
+    }
+);
+
+my %shortxml = ( UpdateADSLContact => 1, UpdateADSLPrice => 1
+    );
+
+# Map methods to URI
+my %uri = ( RequestAppointmentBook => "Appointments",
+    RequestAppointmentSlot => "Appointments",
+    Poll => "Appointments", CreateLLUOrder => "CreateLluOrder"
+    );
+
 
 my %formats = (
-    ADSLChecker => { "PhoneNo" => "phone", "Version" => "4", "PostCode" => "text",
-        "MACcode" => "text" },
-    AdslAccount => { "Username" => "username", "Ref" => "ref", "Telephone" => "telephone" },
-    ProductChange => { 
-        "ProductChange" => {
-            "Username" => "username", "Ref" => "ref", "Telephone" => "telephone",
-            "NewProduct" => {
-                "Family" => "family", "Cap" => "cap", "Speed" => "speed",
-            },
-            "Schedule" => "schedule",
-        },
-    },
-    ListConnections => { "liveorceased" => "text", "fields" => "text" },
-    CheckUsernameAvailable => { "Username" => "username" },
-    GetBTFault => { "day" => "text", "start" => "text", "end" => "text" },
-    GetAdslInstall => { "Username" => "text", "Ref" => "text" },
-    GetBTFeed => { "Days" => "counting" },
-    GetNotes => => { "Username" => "text", "Ref" => "text" },
-    LastRadiusLog => { "Username" => "text", "Ref" => "text" },
-    ConnectionHistory => { "Username" => "text", "Ref" => "text", "Telephone" => "phone", 
-        "days" => "counting" },
-    GetInterleaving => { "Username" => "text", "Ref" => "text", "Telephone" => "phone" },
-    GetOpenADSLFaults => { "Username" => "text", "Ref" => "text", "Telephone" => "phone" },
-    RequestMAC => { "Username" => "text", "Ref" => "text", "Telephone" => "phone" },
-    UsageHistory => { "Username" => "username", "Ref" => "ref", "Telephone" => "telephone",
-        "StartTimeStamp" => "starttimestamp", "EndTimeStamp" => "endtimestamp", 
-        "StartDateTime" => "startdatetime", "EndDateTime" => "enddatetime" },
-    UsageHistoryDetail => { "Username" => "text", "Ref" => "text", "Telephone" => "phone",
-        "startday" => "dd/mm/yyyy", "endday" => "dd/mm/yyyy", "day" => "dd/mm/yyyy" },
-    ADSLTopup => { "username" => "text", "ref" => "text", "telephone" => "phone" },
-    GetMaxReports => { "Username" => "text", "Ref" => "text", "Telephone" => "phone" },
-    CreateADSLOrder => { 
-        ADSLAccount => {
-            "YourRef" => "client-ref", "Product" => "prod-id", "MAC" => "mac",
-            "Title" => "title", "FirstName" => "forename", 
-            "Surname" => "surname", "CompanyName" => "company",
-            "Building" => "building", "Street" => "street", "Town" => "city",
-            "County" => "county", "Postcode" => "postcode", 
-            "TelephoneDay" => "telephone", "TelephoneEvening" => "telephone",
-            "Fax" => "fax", "Email" => "email", "Telephone" => "cli",
-            "ProvisionDate" =>"crd", "NAT" => "allocation-size", 
-            "Username" => "username", "Password" => "password",
-            "LineSpeed" => "linespeed", "OveruseMethod" => "topup",
-            "ISPName" => "losing-isp", "CareLevel" => "care-level",
-            "Interleave" => "max-interleaving", "ForceLowerSpeed" => "classic",
-            "BTProductSpeed" => "classic-speed", "Realm" => "realm",
-            "BaseDomain" => "realm", "ISDN" => "isdn",
-            "InitialCareLevelFee" => "iclfee", 
-            "OngoingCareLevelFee" => "oclfee", "TagOnTheLine" => 'totl',
-            "MaxPAYGAmount" => "payg-limit", "AssignIPV6" => "ipv6"
-        },
-        CustomerRecord => {
-            "cCustomerID" => "customer-id", "cTitle" => "ctitle",
-            "cFirstName" => "cforename", "cSurname" => "csurname",
-            "cCompanyName" => "ccompany", "cBuilding" => "cbuilding",
-            "cStreet" => "cstreet", "cTown" => "ctown", 
-            "cCounty" => "ccounty", "cPostcode" => "cpostcode",
-            "cTelephoneDay" => "ctelephone", 
-            "cTelephoneEvening" => "ctelephone",
-            "cFax" => "cfax", "cEmail" => "cemail"
-        },
-        BillingAccount => {
-            "PurchaseOrderNumber" => "client-ref", 
-            "BillingPeriod" => "billing-period", 
-            "ContractTerm" => "contract-term",
-            "InitialPaymentMethod" => "initial-payment",
-            "OngoingPaymentMethod" => "ongoing-payment",
-            "PaymentMethod" => "payment-method" 
-        }
-    },
-    ModifyLineFeatures => { "ADSLAccount" => {
-        "Ref" => "text", "Username" => "text", "Telephone" => "phone",
-        "LineFeatures" => {
-            "Interleaving" => "text", "StabilityOption" => "text", 
-            "ElevatedBestEfforts" => "yesno", "ElevatedBestEffortsFee" => "text", 
-            "MaintenanceCategory" => "counting", "MaintenanceCategoryFee" => "text"
+# Appointments Methods
+    RequestAppointmentBook => {
+        Date => 'date',
+        TelephoneNumber => 'cli',
+        listOfAttributes => { 
+            Attributes => {
+                AttributeName => 'name',
+                AttributeValue => 'value'
             }
         }
     },
-    CeaseADSLOrder => { "Username" => "username", "Ref" => "ref", "Telephone" => "telephone", 
-        ceaseDate => 'ceasedate' },
-    ChangeInterleave => { "Username" => "text", "Ref" => "text", "Telephone" => "phone",
-        Interleave => "text" },
-    UpdateADSLContact => { "Ref" => "ref", "Username" => "username", Telephone => "telephone",
-        ContactDetails => { Email => "email", TelDay => "phone", TelEve => "phone" } 
-    } );
-
+    RequestAppointmentSlot => {
+        Date => 'date', TimeSlot => 'time-slot',
+        TelephoneNumber => 'cli', listOfAttributes => {
+            Attributes => {
+                AttributeName => 'name',
+                AttributeValue => 'value'
+            }
+        }
+    },
+    Poll => { Token => 'token' },
+# ADSL Checker Method
+    ADSLChecker => { PhoneNo => 1, PostCode => 1,
+        MACcode => 1, EUPostCode => 1
+    },
+# Get Blocked Connections
+    GetBlocked => { ReturnType => 1 },
+# Modify Line Features
+    ModifyLineFeatures => { ADSLAccount => {
+        Ref => 'ref', Username => 'username', Telephone => 'cli',
+        LineFeatures => {
+            Interleaving => 'interleaving',
+            StabilityOption => 'stability',
+            ElevatedBestEfforts => 'ebe',
+            ElevatedBestEffortsFee => 'ebe-fee', 
+            MaintenanceCategory => 'maintenance',
+            MaintenanceCategoryFee => 'maintenance-fee',
+            Upstream => 'upstream',
+            UpstreamFee => 'upstream-fee'
+            }
+        }
+    },
+# Get Rate Limited Connections
+    GetRateLimited => { ReturnType => 1 },
+# Reporting Tools
+    AdslAccount => { Username => 1, Ref => 1, Telephone => 1 },
+    ListConnections => { liveorceased => 1, fields => 1 },
+    CheckUsernameAvailable => { username => 1 },
+    GetBTFault => { day => 1, start => 1, end => 1 },
+    GetAdslInstall => { Username => 1, Ref => 1 },
+    GetBTFeed => { Days => 1 },
+    GetNotes => => { Username => 1, Ref => 1 },
+    PendingOrders => { },
+    PSTNPendingOrders => { },
+    LastRadiusLog => { Username => 1, Ref => 1 },
+    ConnectionHistory => { Username => 1, Ref => 1, Telephone => 1,
+        Days => 1 },
+    GetInterleaving => { Username => 1, Ref => 1, Telephone => 1 },
+    GetOpenADSLFaults => { Username => 1, Ref => 1, Telephone => 1 },
+    RequestMAC => { Username => 1, Ref => 1, Telephone => 1 },
+    UsageHistory => { Username => 1, Ref => 1, Telephone => 1,
+        StartTimestamp => 1, EndTimestamp => 1, 
+        StartDateTime => 1, EndDateTime => 1 },
+    UsageHistoryDetail => { Username => 1, Ref => 1, Telephone => 1,
+        startday => 1, endday => 1, day => 1 },
+    GetMaxReports => { Username => 1, Ref => 1, Telephone => 1 },
+# ADSL TopUp
+    ADSLTopup => { Username => 1, Ref => 1, Telephone => 1 },
+# Heavy User Tool
+    GetHeavyUsers => { Username => 1, Ref => 1, Telephone => 1 },
+# Update ADSL Price
+    UpdateADSLPrice => { ADSLAccount => {
+        Username => 'username', Ref => 'ref', Telephone => 'cli', 
+        PriceDetails => {
+            PeriodFee => 'period-fee',
+            EnhancedCareFee => 'enhanced-fee', 
+            ElevatedBestEffortsFee => 'ebe-fee' }
+        }
+    },
+# Update ADSL Contact Details
+    UpdateADSLContact => { ADSLAccount => {
+        Username => 'username', Ref => 'ref', Telephone => 'cli',
+        ContactDetails => {
+            Email => 'email', TelDay => 'telephone',
+            TelEve => 'telephone-eve' }
+        }
+    },
+# Usage Information    
+    GetADSLUsage => { FromDate => 1, ToDate => 1, MinUsage => 1, 
+        Product => 1, ReturnType => 1
+    },
+# LLU Create Order
+    CreateLLUOrder => {
+        ADSLAccount => {
+            Product => 'prod-id', Title => 'title',
+            FirstName => 'forename', Surname => 'surname',
+            CompanyName => 'company', Building => 'building',
+            Street => 'street', Town => 'city', County => 'county',
+            Postcode => 'postcode', TelephoneDay => 'telephone', 
+            TelephoneEvening => 'telephone-eve', Fax => 'fax',
+            Email => 'email', Telephone => 'cli', ProvisionDate => 'crd',
+            MAC => 'mac', 
+            Charges => {
+                Initial => 'ci-fee', Recurring => 'cr-fee'
+            },
+        },
+        RadiusDetails => {
+            Username => 'username', Password => 'password',
+            Realm => 'realm', BaseDomain => 'basedomain',
+            IPAddresses => {
+                IPv4 => { NumberRequired => 'allocation-size' },
+                IPv6 => { Enabled => 'ipv6' }
+            }
+        },
+        BillingAccount => {
+            ContractTerm => 'contract-term',
+            BillingPeriod => 'billing-period',
+            InitialPaymentMethod => 'initial-payment',
+            OngoingPaymentMethod => 'ongoing-payment',
+            PaymentMethod => 'payment-method',
+            PurchaseOrderNumber => 'client-ref'
+        },
+        CustomerRecord => {
+            cCustomerID => 'customer-id', cTitle => 'ctitle',
+            cFirstName => 'cforename', cSurname => 'csurname',
+            cCompanyName => 'ccompany', cBuilding => 'cbuilding', 
+            cStreet => 'cstreet', cTown => 'ctown', cCounty => 'ccounty',
+            cPostcode => 'cpostcode', cTelephoneDay => 'ctelephone',
+            cTelephoneEvening => 'ctelephone', cFax => 'cfax', 
+            cEmail => 'cemail'
+        }
+    },
+# Create ADSL / FTTC Order (not LLU)
+    CreateADSLOrder => {
+        ADSLAccount => {
+            Product => 'prod-id', ProductInitialFee => 'initial-fee', 
+            ProductOngoingFee => 'recurring-fee', Title => 'title',
+            FirstName => 'forename', Surname => 'surname',
+            CompanyName => 'company', Building => 'building', 
+            Street => 'street', Town => 'city', County => 'county', 
+            Postcode => 'postcode', OnsiteHazards => 'hazards', 
+            TelephoneDay => 'telephone', TelephoneEvening => 'telephone-eve', 
+            Fax => 'fax', Email => 'email', Telephone => 'cli', 
+            ProvisionDate => 'crd', NAT => 'allocation-size',
+            InitialNoNATFee => 'ipv4-fee', NoNatReason => 'ipv4-reason', 
+            Username => 'username', Password => 'password', 
+            ISPName => 'losing-isp', CareLevel => 'care-level', 
+            InitialCareLevelFee => 'iclfee', OngoingCareLevelFee => 'oclfee', 
+            LineSpeed => 'linespeed', OveruseMethod => 'topup', 
+            MaxPAYGAmount => 'payg-limit', MAC => 'mac', Realm => 'realm',
+            BaseDomain => 'base-domain', StabilityOption => 'stability',
+            Interleave => 'max-interleaving', BestEfforts => 'best-efforts',
+            BestEffortsInitialFee => 'be-initial-fee',
+            BestEffortsOngoingFee => 'be-recurring-fee', 
+            InstallFee => 'install-fee', Upstream => 'upstream',
+            UpstreamInitialFee => 'up-initial-fee', 
+            UpstreamOngoingFee => 'up-recurring-fee', AssignIPV6 => 'ipv6'
+        },
+        BillingAccount => {
+            PurchaseOrderNumber => 'client-ref', 
+            BillingPeriod => 'billing-period', 
+            ContractTerm => 'contract-term',
+            InitialPaymentMethod => 'initial-payment',
+            OngoingPaymentMethod => 'ongoing-payment', 
+            PaymentMethod => 'payment-method'
+        },
+        CustomerRecord => {
+            cCustomerID => 'customer-id', cTitle => 'ctitle', 
+            cFirstName => 'cforename', cSurname => 'csurname', 
+            cCompanyName => 'ccompany', cBuilding => 'cbuilding',
+            cStreet => 'cstreet', cTown => 'ctown', 
+            cCounty => 'ccounty', cPostcode => 'cpostcode',
+            cTelephoneDay => 'ctelephone', 
+            cTelephoneEvening => 'ctelephone-eve', 
+            cFax => 'cfax', cEmail => 'cemail'
+        },
+        AppointmentDetails => {
+            AppointmentReference => 'appt-ref'
+        }
+    }
+);
 
 sub _request_xml {
     my ($self, $method, $args) = @_;
 
-    if ( $args->{cli} && ( ! $args->{Telephone} ) ) {
-        $args->{Telephone} = $args->{cli};
-    }
-
     my $live = "Test";
     $live = "Live" unless $self->testing;
 
-    my $xml = qq|<?xml version="1.0" encoding="UTF-8"?>\n<ResponseBlock Type="$live">\n|;
-    if ( $enta_xml_methods{$method} ) {
-        if ( $method eq 'CeaseADSLOrder' ) {
-            $xml .= qq|<Response Type="ADSLCease">\n<OperationResponse">\n|;
-        }
-        else { 
-            $xml .= qq|<Response Type="| . $entatype{$method} . qq|">\n<OperationResponse Type="| . $entatype{$method} . qq|">\n|;
-        }
-    } else {
-        $xml .= qq|<OperationResponse Type="| . $entatype{$method} . qq|">\n|;
+    my $rtype = $method;
+    $rtype = "LluOrder" if $method eq "CreateLLUOrder";
+
+    if ( $method eq "CreateADSLOrder" ) {
+        $rtype = "ADSLOrder";
+        $rtype = "ADSLMigrationOrder" if $args->{mac};
+    }
+
+    my $xml = qq|<?xml version="1.0" encoding="UTF-8"?>
+    <ResponseBlock Type="$live">|;
+    if ( $shortxml{$method} ) {
+        $xml .= qq|<OperationResponse Type="$rtype">\n|;
+    }
+    else {
+        $xml .= qq|
+    <Response Type="$rtype">
+    <OperationResponse>\n|;
     }
 
     my $recurse;
     $recurse = sub {
         my ($format, $data) = @_;
         while (my ($key, $contents) = each %$format) {
+            if ($key eq 'Ref' || $key eq 'Username' || $key eq 'Telephone') {
+                next unless $args->{$contents};
+            }
+            next if $optional{$method}->{$key} && ! $args->{$contents};
+
             if (ref $contents eq "HASH") {
-                if ($key) {
-                    if ( $key eq 'ProductChange' ) {
-                        my $id = "Ref" if $args->{Ref};
-                        $id = "Telephone" if $args->{Telephone};
-                        $id = "Username" if $args->{Username};
-                        $xml .= qq|<$key $id="|.$args->{$id}.qq|">\n|;
-                    }
-                    else {
-                        $xml .= "\t<$key>\n";
-                    }
-                }
+                $xml .= "\t<$key>\n";
                 $recurse->($contents, $data->{$key});
                 if ($key) {
                     $xml .= "</$key>\n";
                 }
             } else {
-                $xml .= qq{\t\t<$key>}.encode_entities_numeric($args->{$key})."</$key>\n" if $args->{$key};
+                $xml .= qq{\t\t<$key>};
+                $xml .= encode_entities_numeric($args->{$contents}) if $args->{$contents};
+                $xml .= qq{</$key>\n};
+                # $xml .= qq{\t\t<$key>}.encode_entities_numeric($args->{$contents})."</$key>\n";
             }
         }
     };
     $recurse->($formats{$method}, $args); 
 
-    if ( $enta_xml_methods{$method} ) {
-        $xml .= "</OperationResponse>\n</Response>\n</ResponseBlock>";
-    } else {
+    if ( $shortxml{$method} ) {
         $xml .= "</OperationResponse>\n</ResponseBlock>";
+    }
+    else {
+        $xml .= "</OperationResponse>\n</Response>\n</ResponseBlock>";
     }
     return $xml;
 }
@@ -181,12 +314,17 @@ sub _make_request {
     my $agent = __PACKAGE__ . '/0.1 ';
     $ua->agent($agent . $ua->agent);
 
-    my $url = ENDPOINT . "xml/$method" . '.php';
-    $url = ENDPOINT . "xml-beta/$method" . '.php' if $method eq "UsageHistory";
-    $url = ENDPOINT . "xml/AdslProductChange" . '.php' if $method eq "ProductChange";
-    if ( $enta_xml_methods{$method} ) {     
+    my $version = ($self->version ? $self->version : 'stable');
+
+    my $uri = ($uri{$method} ? $uri{$method} : $method);
+
+    my $url = ENDPOINT . "$version/$uri" . '.php';
+
+    if ( $requesttype{$method} eq 'post' ) {
         push @{$ua->requests_redirectable}, 'POST';
         my $xml = $self->_request_xml($method, $data);
+
+        warn $xml if $self->debug;
 
         $body .= "--" . BOUNDARY . "\n";
         $body .= "Content-Disposition: form-data; name=\"userfile\"; filename=\"XML.data\"\n";
@@ -200,32 +338,42 @@ sub _make_request {
         push @{$ua->requests_redirectable}, 'GET';
         my ($key, $value);
         $url .= '?';
-        $url .= "$key=$value&" while (($key, $value) = each (%$data));
+        foreach my $key (keys %$data) {
+            next unless $data->{$key};
+            $url .= "$key=".$data->{$key}."&";
+        }
 
         $req = new HTTP::Request 'GET' => $url;
     }
 
-    $req->authorization_basic(@{[$self->user]}, @{[$self->pass]});
+    $req->authorization_basic($self->user, $self->pass);
     $req->header( 'MIME_Version' => '1.0', 'Accept' => 'text/xml' );
 
-    if ( $enta_xml_methods{$method}) {
+    if ( $requesttype{$method} eq 'post' ) {
         $req->header('Content-type' => 'multipart/form-data; type="text/xml"; boundary=' . BOUNDARY);
         $req->header('Content-length' => length $body);
         $req->content($body);
     }
 
-    if ( $self->debug ) { use Data::Dumper; warn Dumper $req; }
+    $self->_debug_dump($req) if $self->debug;
 
     $res = $ua->request($req);
     
-    if ( $self->debug ) { warn $res->content; }
+    $self->_debug_dump($res->content) if $self->debug;
 
     die "Request for Enta method $method failed: " . $res->message if $res->is_error;
 
     # Sometimes Enta doesn't return anything at all on success
     return undef unless $res->content;
+    my $response = $res->content;
 
-    my $resp_o = XMLin($res->content, SuppressEmpty => 1);
+    # remove \r\n characters if Enta developers insert them - idiots!
+    if ( $response =~ /^\r\n/ ) {
+        $response = substr($res->content, 2);
+        $self->_debug_dump($response) if $self->debug;
+    }
+
+    my $resp_o = XMLin($response, SuppressEmpty => 1);
 
     if ($resp_o->{Response}->{Type} eq 'Error') { die $resp_o->{Response}->{OperationResponse}->{ErrorDescription}; };
 
@@ -248,9 +396,17 @@ sub _make_request {
 
     $recurse->($resp_o);
 
-    if ( $self->debug ) { use Data::Dumper; warn Dumper $resp_o; }
-    
-    return $resp_o;
+    $self->_debug_dump($resp_o) if $self->debug;
+
+    if ( $resp_o->{Response}->{OperationResponse} ) {
+        return $resp_o->{Response}->{OperationResponse};
+    }
+    elsif ($resp_o->{OperationResponse}) {
+        return $resp_o->{OperationResponse};
+    }
+    else {
+        return $resp_o->{Response};
+    }
 }
 
 sub _convert_input {
@@ -293,8 +449,13 @@ sub _serviceid {
     return { "Ref" => $args->{"ref"} } if $args->{"ref"};
     return { "Username" => $args->{"username"} } if $args->{"username"};
     return { "Telephone" => $args->{"telephone"} } if $args->{"telephone"};
+    return { "Telephone" => $args->{"cli"} } if $args->{"cli"};
 }
 
+sub _date_format {
+    my ($self, $date) = @_;
+    return $date->strftime(($self->{dateformat} ? $self->{dateformat} : "%Y-%m-%d"));
+}
 
 =head2 services_available
 
@@ -391,6 +552,211 @@ sub services_available {
     return %rv;
 }
 
+=head2 get_appointments
+    $enta->get_appointments( cli => "02070010001",
+        date => "2012-01-01",
+        attributes => { ExtensionKit => 1 }
+    );
+
+Returns an array listing available appointment slots or, if it is not 
+possible to obtain appointments, returns a token to poll for the 
+list at a later point.
+
+Required parameters:
+
+    cli         Telephone Number
+    date        Earliest date for appointments
+
+Optional parameters:
+
+    attributes  Hash ref of required extensions (see Enta docs)
+
+=cut
+
+sub get_appointments {
+    my ($self, %args) = @_;
+    return unless $args{cli} && $args{date};
+
+    my $d = Time::Piece->strptime($args{date}, "%F");
+
+    my $data = {
+        cli => $args{cli},
+        date => $d->strftime("%d/%m/%y")
+    };
+
+    foreach ( keys %{$args{attributes}} ) {
+        $data->{name} = $_;
+        $data->{value} = $args{attributes}->{$_};
+    }
+
+    my $response = $self->_make_request("RequestAppointmentBook", $data);
+    my $token = $response->{Token};
+
+    my $appts = $self->_make_request("Poll", { token => $token });
+    if ( $response->{ListOfAppointment}->{Appointment} ) {
+        return $response->{ListOfAppointment}->{Appointment};
+    }
+    return;
+}
+
+=head2 book_appointment
+
+    $enta->book_appointment($tokenid);
+
+Book a specific appointment slot
+
+=cut
+
+sub book_appointment {
+    my ($self, %args) = @_;
+    return unless $args{date} & $args{timeslot} && $args{cli};
+
+    my $data = {
+        Telephone => $args{cli},
+        Date => $args{date},
+        TimeSlot => $args{timeslot}
+    };
+    foreach (keys %{$args{attributes}}) {
+        $data->{name} = $_;
+        $data->{value} = $args{attributes}->{$_};
+    }
+
+    my $response = $self->_make_request("RequestAppointmentSlot", $data);
+    my $token = $response->{Token};
+
+    my $appt = $self->_make_request("Poll", { token => $token });
+    return unless $appt->{Date};
+    return $appt;
+}
+
+=head2 poll
+
+    $enta->poll(token => '12345');
+
+Poll for an appointment slot or appointment confirmation 
+
+See get_appointments and book_appointment methods
+
+=cut
+
+sub poll {
+    my ($self, %args) = @_;
+    $self->_check_params(\%args, qw/token/);
+    $self->_make_request("Poll", \%args);
+}
+
+=head2 list_connections
+
+    $enta->list_connections(liveorceased=>"live", fields=>"Username,Ref");
+
+Returns a list of connections as an array
+
+=cut
+
+sub list_connections {
+    my ($self, %args) = @_;
+    return unless $args{liveorceased} && $args{fields};
+
+    my $response = $self->_make_request("ListConnections", \%args);
+    return @{$response->{ADSLAccount}};
+}
+
+=head2 pending_orders
+
+    $enta->pending_orders();
+
+Returns a list of all pending orders with their status    
+
+=cut    
+
+sub pending_orders {
+    my ($self, %args) = @_;
+    my $response = $self->_make_request("PendingOrders", \%args);
+    return unless $response->{Orders}->{NumberOfOrders} > 0;
+    return @{$response->{Orders}->{Order}};
+}
+
+=head2 pstn_pending_orders
+
+    $enta->pstn_pending_orders();
+
+Returns a list of all pending PSTN orders
+
+=cut
+
+sub pstn_pending_orders {
+    my ($self, %args) = @_;
+    my $response = $self->_make_request("PSTNPendingOrders", \%args);
+    return unless $response->{Orders}->{NumberOfOrders} > 0;
+    return @{$response->{Orders}->{Order}};
+}
+
+=head2 rate_limited
+
+    $enta->rate_limited( returntype => "username" );
+
+Returns a list of connections which are currently rate limited
+
+=cut
+
+sub rate_limited {
+    my ($self, %args) = @_;
+    if ( $args{returntype} ) {
+        $args{returntype} = ucfirst $args{returntype};
+    }
+
+    my $response = $self->_make_request("GetRateLimited", \%args);
+}
+
+=head2 get_blocked
+    
+    $enta->get_blocked( returntype => "telephone" );
+
+Return a list of connections which are blocked and the reason for the
+block.
+
+=cut
+
+sub get_blocked {
+    my ($self, %args) = @_;
+    $args{returntype} = ucfirst $args{returntype} if $args{returntype};
+
+    my $response = $self->_make_request("GetBlocked", \%args);
+    return @{$response->{ADSLAccount}};
+}
+
+=head2 get_bt_faults
+
+    $enta->get_bt_faults();
+
+Returns a list of faults open with BT
+
+See Enta docs for params
+
+=cut
+
+sub get_bt_faults {
+    my ($self, %args) = @_;
+
+    my $response = $self->_make_request("GetBTFault", \%args);
+    return if $response->{TotalResults} == 0;
+}
+
+=head2 heavy
+
+    $enta->heavy();
+
+Returns a list of heavy users
+
+See Enta docs for more details
+
+=cut
+
+sub heavy {
+    my ($self, %args) = @_;
+    $self->_make_request("GetHeavyUsers", \%args);
+}
+
 =head2 regrade_options
 
     $enta->regrade_options( "service-id" => "ADSL12345" );
@@ -429,21 +795,20 @@ sub adslchecker {
         "PhoneNo" => $args{cli},
         "PostCode" => $args{postcode},
         "MACcode" => $args{mac},
-        "Version" => 4
         } ;
 
     my $response = $self->_make_request("ADSLChecker", $data);
 
     my %results = ();
-    foreach (keys %{$response->{Response}->{OperationResponse}}) {
-        if ( ref $response->{Response}->{OperationResponse}->{$_} eq "HASH" ) {
+    foreach (keys %{$response}) {
+        if ( ref $response->{$_} eq "HASH" ) {
             my $a = $_;
-            foreach (keys %{$response->{Response}->{OperationResponse}->{$a}}) {
-                $results{$a}{$_} = $response->{Response}->{OperationResponse}->{$a}->{$_};
+            foreach (keys %{$response->{$a}}) {
+                $results{$a}{$_} = $response->{$a}->{$_};
             }
         }
         else {
-            $results{$_} = $response->{Response}->{OperationResponse}->{$_};
+            $results{$_} = $response->{$_};
         }
     }
     return %results;
@@ -465,7 +830,7 @@ sub username_available {
     my $response = $self->_make_request("CheckUsernameAvailable", 
         { "username" => $username } );
 
-    return undef if $response->{Response}->{OperationResponse}->{Available} eq "false";
+    return undef if $response->{Available} eq "false";
     return 1;
 }
 
@@ -509,8 +874,7 @@ sub interleaving_status {
     my $data = $self->_serviceid(\%args);
     my $response = $self->_make_request("GetInterleaving", $data);
 
-    return $response->{Response}->{OperationResponse}->{Interleave};
-
+    return $response->{Interleave};
 }
 
 =head2 interleaving
@@ -584,7 +948,7 @@ sub elevatedbestefforts {
 
 =head2 care_level
 
-    $enta->care_level( "service-id" -> "ADSL12345", "care-level" => "enhanced" );
+    $enta->carei_level( "service-id" -> "ADSL12345", "care-level" => "enhanced" );
 
 Changes the care-level associated with a given service. 
 
@@ -667,8 +1031,8 @@ sub modifylinefeatures {
     my $response = $self->_make_request("ModifyLineFeatures", $data);
 
     my %return = ();
-    foreach ( keys %{$response->{Response}->{OperationResponse}->{ADSLAccount}->{LineFeatures}} ) {
-        $return{lc $_} = $response->{Response}->{OperationResponse}->{ADSLAccount}->{LineFeatures}->{$_}->{NewValue};
+    foreach ( keys %{$response->{ADSLAccount}->{LineFeatures}} ) {
+        $return{lc $_} = $response->{ADSLAccount}->{LineFeatures}->{$_}->{NewValue};
     }
     return \%return;
 }
@@ -751,7 +1115,7 @@ sub getbtfeed {
     my $response = $self->_make_request("GetBTFeed", { "Days" => $args{days} });
 
     my @records = ();
-    while ( my $r = pop @{$response->{Response}->{OperationResponse}->{Records}->{Record}} ) {
+    while ( my $r = pop @{$response->{Records}->{Record}} ) {
         my %a = ();
         foreach (keys %$r) {
             $a{lc $_} = $r->{$_};
@@ -779,13 +1143,25 @@ sub update_contact {
     my ( $self, %args) = @_;
     $self->_check_params(\%args);
 
-    my $data = $self->_serviceid(\%args);
-    for (qw/Email TelDay TelEve/) {
-        $data->{$_} = $args{lc $_} if $args{lc $_};
-    }
+    my $response = $self->_make_request("UpdateADSLContact", \%args);
+    return $response->{ADSLAccount}->{ContactDetails};
+}
 
-    my $response = $self->_make_request("UpdateADSLContact", $data);
-    return 1;
+
+=head2 update_price
+
+    $enta->update_price("service-id" => "ADSL1234", period-fee => 19.99);
+
+Updates the price charged for a given service
+
+=cut
+
+sub update_price {
+    my ($self, %args) = @_;
+    $self->_check_params(\%args);
+
+    my $response = $self->_make_request("UpdateADSLPrice", \%args);
+    return $response;
 }
 
 =head2 cease
@@ -814,9 +1190,9 @@ sub cease {
     
     my $response = $self->_make_request("CeaseADSLOrder", $data);
 
-    die "Cease order not accepted by Enta" unless $response->{Response}->{Type} eq 'Accept';
+    die "Cease order not accepted by Enta" unless $response->{Type} eq 'Accept';
 
-    return $response->{Response}->{OperationResponse}->{OurRef};
+    return $response->{OurRef};
 }
 
 =head2 request_mac
@@ -873,12 +1249,12 @@ sub auth_log {
     my $date_format = "%Y-%m-%d %H:%M:%S";
     $date_format = $args{dateformat} if $args{dateformat};
 
-    my $t = Time::Piece->strptime($response->{Response}->{OperationResponse}->{DateTime}, "%d %b %Y %H:%M:%S");
+    my $t = Time::Piece->strptime($response->{DateTime}, "%d %b %Y %H:%M:%S");
 
     $log{"auth_date"} = $t->strftime($date_format);
-    $log{"username"} = $response->{Response}->{OperationResponse}->{Username};
+    $log{"username"} = $response->{Username};
     $log{"result"} = "Login OK";
-    $log{"ip_address"} = $response->{Response}->{OperationResponse}->{IPAddress};
+    $log{"ip_address"} = $response->{IPAddress};
 
     push @r, \%log;
     return @r;
@@ -904,7 +1280,7 @@ sub max_reports {
     my @rate = ();
     my @profile = ();
 
-    while ( my $r = shift @{$response->{"Response"}->{"Report"}} ) {
+    while ( my $r = shift @{$response->{"Report"}} ) {
         if ( $r->{"Name"} eq "Line RateChange" ) {
             while (my $rec = shift @{$r->{Record}} ) {
                 my %a = ();
@@ -983,7 +1359,8 @@ sub getadslinstall {
     $dateformat = $args{dateformat} if $args{dateformat};
 
     my @history = ();
-    while ( my $log = shift @{$response->{Response}->{OperationResponse}->{InstallReturns}->{InstallReturn}} ) {
+    while ( my $log = shift @{$response->{InstallReturns}->{InstallReturn}} ) {
+        
         my %a = ();
         my $d = localtime($log->{DateReceived});
         $a{date} = $d->strftime($dateformat);
@@ -1038,19 +1415,27 @@ sub adslaccount {
     my $response = $self->_make_request("AdslAccount", $data );
 
     my %adsl = ();
-    foreach (keys %{$response->{Response}->{OperationResponse}} ) {
-        if ( ref $response->{Response}->{OperationResponse}->{$_} eq 'HASH' ) {
+    foreach (keys %{$response} ) {
+        if ( ref $response->{$_} eq 'HASH' ) {
             my $b = $_;
-            foreach ( keys %{$response->{Response}->{OperationResponse}->{$b}} ) {
-                $adsl{lc $b}{lc $_} = $response->{Response}->{OperationResponse}->{$b}->{$_};
+            foreach ( keys %{$response->{$b}} ) {
+                $adsl{lc $b}{lc $_} = $response->{$b}->{$_};
             }
         }
         else {
-            $adsl{lc $_} = $response->{Response}->{OperationResponse}->{$_};
+            $adsl{lc $_} = $response->{$_};
         }
     }
     $adsl{service_details}->{live} = 'N';
     $adsl{service_details}->{live} = 'Y' if $adsl{adslaccount}->{status} eq 'Installed';
+
+    $adsl{service_details}->{cli} = $adsl{adslaccount}->{telephone};
+    $adsl{service_details}->{service_id} = $adsl{adslaccount}->{ourref};
+    $adsl{service_details}->{technology_type} = $adsl{adslaccount}->{connectiontype};
+    $adsl{service_details}->{username} = $adsl{adslaccount}->{username};
+    $adsl{service_details}->{password} = $adsl{adslaccount}->{password};
+    $adsl{service_details}->{product_id} = $adsl{adslaccount}->{product};
+    $adsl{service_details}->{ip_address} = $adsl{adslaccount}->{ipaddress};
 
     $adsl{adslaccount}->{provisiondate} =~ /(.*) \+0\d00/;
     my $activation_date = Time::Piece->strptime($1, "%a, %d %b %Y %H:%M:%S");
@@ -1113,106 +1498,67 @@ sub order {
 
     $self->_check_params(\%args, @required);
 
-    $args{"isdn"} = 'N';
-    $entatype{"CreateADSLOrder"} = "ADSLMigrationOrder" if $args{mac};
     my $d = Time::Piece->strptime($args{"crd"}, "%F");
     $args{"crd"} = $d->dmy("/");
+    $args{"telephone-eve"} = $args{telephone} unless $args{"telephone-eve"};
+    $args{"ctelephone-eve"} = $args{ctelephone} unless $args{"ctelephone-eve"};
 
-    my $data = $self->_convert_input("CreateADSLOrder", \%args);
+    my $response = $self->_make_request("CreateADSLOrder", \%args);
 
-    my $response = $self->_make_request("CreateADSLOrder", $data);
+    return ( "order_id" => $response->{OurRef},
+             "service_id" => $response->{OurRef},
+             "payment_code" => $response->{TelephonePaymentCode} );
+}
 
-    return ( "order_id" => $response->{Response}->{OperationResponse}->{OurRef},
-             "service_id" => $response->{Response}->{OperationResponse}->{OurRef},
-             "payment_code" => $response->{Response}->{OperationResponse}->{TelephonePaymentCode} );
+=head2 llu_order
+
+    $enta->llu_order(...)
+
+Place an order for an LLU service. See Enta docs for details    
+
+=cut
+
+sub llu_order {
+    my ($self, %args) = @_;
+    my $d = Time::Piece->strptime($args{"crd"}, "%F");
+    $args{"crd"} = $d->strftime("%d/%m/%y");
+
+    $args{"ci-fee"} = "30.00" unless $args{"ci-fee"};
+    $args{"cr-fee"} = "30.00" unless $args{"cr-fee"};
+
+    $args{building} = $args{street} unless $args{building};
+
+    $self->_make_request("CreateLLUOrder", \%args);
 }
 
 =head2 terms_and_conditions
 
-Returns the terms-and-conditions to be presented to the user for signup
-of a broadband product.
+    Returns the URI where the T&C for Entanet services is located.
 
 =cut
 
 sub terms_and_conditions {
-    return "XXX Get terms and conditions dynamically, or just put them here";
+    return "http://www.enta.net/downloads/entanet_tandc.pdf";
 }
 
 =head2 product_change
 
-    $enta->product_change( "username" => "myusername", "family" => "Family",
-        "cap" => "30", "speed" => "8000" );
-
-Place an order to change the specified service to the given new product.
-
-Note that you can only use username or telephone to identify the service. 
-You cannot use ref or service-id
+    Not implemented in Enta API Yet
 
 =cut
 
 sub product_change {
-    my ($self, %args) = @_;
-    $self->_check_params(\%args, ("ref|username|telephone|service-id", 
-            "family", "cap", "speed"));
-
-    if ( $args{"ref"} || $args{"service-id"}) {
-        my %adsl = $self->adslaccount(%args);
-        $args{"username"} = $adsl{adslaccount}->{username};
-        delete $args{"ref"} if $args{"ref"};
-    }
-
-    $args{schedule} = "FirstAvailableDate";
-
-    my $data = $self->_convert_input("ProductChange", \%args);
-    my $response = $self->_make_request("ProductChange", $data);
-
-    return $response->{Response}->{OperationResponse}->{ProductChange}->{Results};
+    return;
 }
 
 =head2 regrade
 
-    $enta->regrade( "service-id" => "ADSL12345",
-                    "prod-id" => "FAM30" );
-
-Places an order to regrade the specified service to the specified prod-id.
-
-Required parameters:
-
-    prod-id : New Enta product ID
-    service-id : you must provide one of service-id, ref, username or telephone
+    Not Implemented in Enta API Yet
 
 =cut
 
 sub regrade {
-    my ($self, %args) = @_;
-    $self->_check_params(\%args);
-
-    my %adsl = $self->adslaccount(%args);
-    my %data = ( "username" => $adsl{adslaccount}->{username} );
-
-    my $speed = $adsl{adslaccount}->{actualbtproduct};
-
-    if ( ( $speed =~ /Premium/ && $args{"prod-id"} !~ /BUS/ ) ||
-         ( $speed !~ /Premium/ && $args{"prod-id"} =~ /BUS/ ) ) {
-        die "To switch between a Family and Business product requires a manual request to Enta";
-    }
-
-    $speed = "24000" if $speed eq 'WBC End User Access (EUA)';
-    $speed = "8000" if $speed =~ /BT IPStream Max/;
-    $speed = "2000" if $speed =~ /BT IPStream .* 2000/;
-    $speed = "1000" if $speed =~ /BT IPStream .* 1000/;
-    $speed = "500" if $speed =~ /BT IPStream .* 500/;
-
-    $data{speed} = $speed;
-
-    if ( $args{"prod-id"} =~ /(\D+)(\d+)/ ) {
-        my $family = "Family";
-        $family = "Business" if $1 eq 'BUS';
-        $data{family} = $family;
-        $data{cap} = $2;
-
-        return $self->product_change(%data);
-    }
+    return;
 }
 
 =head2 usage_summary 
@@ -1262,7 +1608,7 @@ sub usage_summary {
 
 =head2 usage_history
 
-    $enta->usage_history(startdatetime => '2010-01-01', enddatetime => '2010-12-01');
+    $enta->usage_history( startdatetime => '2010-01-01', enddatetime => '2010-12-01');
 
 =cut
 
@@ -1285,8 +1631,8 @@ sub usage_history {
 
     my $response = $self->_make_request("UsageHistory", $data);
 
-    my $s = Time::Piece->strptime($response->{Response}->{OperationResponse}->{StartDateTime}, "%d %b %Y %H:%M:%S");
-    my $e = Time::Piece->strptime($response->{Response}->{OperationResponse}->{EndDateTime}, "%d %b %Y %H:%M:%S");
+    my $s = Time::Piece->strptime($response->{StartDateTime}, "%d %b %Y %H:%M:%S");
+    my $e = Time::Piece->strptime($response->{EndDateTime}, "%d %b %Y %H:%M:%S");
 
     my %u = ();
 
@@ -1299,10 +1645,10 @@ sub usage_history {
         $u{"end_date_time"} = $e->ymd.' '.$e->hms;
     }
 
-    $u{peak_download} = $response->{Response}->{OperationResponse}->{PeakDownload};
-    $u{peak_upload} = $response->{Response}->{OperationResponse}->{PeakUpload};
-    $u{download} = $response->{Response}->{OperationResponse}->{Download};
-    $u{upload} = $response->{Response}->{OperationResponse}->{Upload};
+    $u{peak_download} = $response->{PeakDownload};
+    $u{peak_upload} = $response->{PeakUpload};
+    $u{download} = $response->{Download};
+    $u{upload} = $response->{Upload};
 
     return %u;
 }
@@ -1375,7 +1721,7 @@ sub usage_history_detail {
 
     my @usage = ();
     if ( $args{"day"} ) {
-        while (my $r = shift @{$response->{ResponseType}->{Detail}->{Usage}} ) {
+        while (my $r = shift @{$response->{Detail}->{Usage}} ) {
             my %row = ();
             foreach ( keys %{$r} ) {
                 my $key = lc $_;
@@ -1385,8 +1731,8 @@ sub usage_history_detail {
         }
     }
     else {
-        if ( ref $response->{ResponseType}->{Day} eq 'ARRAY' ) {
-            while (my $r = shift @{$response->{ResponseType}->{Day}} ) {
+        if ( ref $response->{Day} eq 'ARRAY' ) {
+            while (my $r = shift @{$response->{Day}} ) {
                 my %row = ();
                 my $d = Time::Piece->strptime($r->{Date}, "%F");
                 $row{'date'} = $d->strftime($date_format);
@@ -1400,12 +1746,12 @@ sub usage_history_detail {
         }
         else {
             my %row = ();
-            my $d = Time::Piece->strptime($response->{ResponseType}->{Day}->{Date}, "%F");
+            my $d = Time::Piece->strptime($response->{Day}->{Date}, "%F");
             $row{'date'} = $d->strftime($date_format);
-            $row{'totalup'} = $response->{ResponseType}->{Day}->{Total}->{Up};
-            $row{'totaldown'} = $response->{ResponseType}->{Day}->{Total}->{Down};
-            $row{'peakup'} = $response->{ResponseType}->{Day}->{Peak}->{Up};
-            $row{'peakdown'} = $response->{ResponseType}->{Day}->{Peak}->{Down};
+            $row{'totalup'} = $response->{Day}->{Total}->{Up};
+            $row{'totaldown'} = $response->{Day}->{Total}->{Down};
+            $row{'peakup'} = $response->{Day}->{Peak}->{Up};
+            $row{'peakdown'} = $response->{Day}->{Peak}->{Down};
 
             push @usage, \%row;
         }
@@ -1433,7 +1779,7 @@ sub allowance {
     }
     my $response = $self->_make_request("ADSLTopup", $data );
 
-    return %{$response->{Response}->{OperationResponse}};
+    return %{$response};
 }
 
 =head2 session_log
@@ -1482,8 +1828,8 @@ sub connectionhistory {
     
     my @history = ();
 
-    if ( ref $response->{Response}->{OperationResponse}->{Connection} eq 'ARRAY' ) {
-        while ( my $h = pop @{$response->{Response}->{OperationResponse}->{Connection}} ) {
+    if ( ref $response->{Connection} eq 'ARRAY' ) {
+        while ( my $h = pop @{$response->{Connection}} ) {
             my %a = ();
             my $start = Time::Piece->strptime($h->{"StartDateTime"}, "%d %b %Y %H:%M:%S");
             my $end = Time::Piece->strptime($h->{"EndDateTime"}, "%d %b %Y %H:%M:%S");
@@ -1513,21 +1859,21 @@ sub connectionhistory {
     }
     else {
         my %a = ();
-        my $start = Time::Piece->strptime($response->{Response}->{OperationResponse}->{Connection}->{"StartDateTime"}, "%d %b %Y %H:%M:%S");
-        my $end = Time::Piece->strptime($response->{Response}->{OperationResponse}->{Connection}->{"EndDateTime"}, "%d %b %Y %H:%M:%S");
+        my $start = Time::Piece->strptime($response->{Connection}->{"StartDateTime"}, "%d %b %Y %H:%M:%S");
+        my $end = Time::Piece->strptime($response->{Connection}->{"EndDateTime"}, "%d %b %Y %H:%M:%S");
         $a{"start_time"} = $start->strftime($date_format);
         $a{"stop_time"} = $end->strftime($date_format);
         $a{"duration"} = $end - $start;
-        $a{"username"} = $response->{Response}->{OperationResponse}->{Connection}->{"Username"};
+        $a{"username"} = $response->{Connection}->{"Username"};
 
         my ($download, $upload, $measure) = ();
 
-        ($upload, $measure) = split $response->{Response}->{OperationResponse}->{Connection}->{"Input"};
+        ($upload, $measure) = split $response->{Connection}->{"Input"};
         $a{"upload"} = $upload * 1024*1024*1024 if $measure eq 'GB';
         $a{"upload"} = $upload * 1024*1024 if $measure eq 'MB';
         $a{"upload"} = $upload * 1024 if $measure eq 'KB';
 
-        ($download, $measure) = split $response->{Response}->{OperationResponse}->{Connection}->{"Output"};
+        ($download, $measure) = split $response->{Connection}->{"Output"};
         $a{"download"} = $download * 1024*1024*1024 if $measure eq 'GB';
         $a{"download"} = $download * 1024*1024 if $measure eq 'MB';
         $a{"download"} = $download * 1024 if $measure eq 'KB';
@@ -1554,8 +1900,8 @@ sub case_search {
     my @c = ();
     my $date_format = "%Y-%m-%d %H:%M:%S";
     $date_format = $args{dateformat} if $args{dateformat};
-    if ( ref $response->{Response}->{OperationResponse}->{Notes}->{Note} eq 'ARRAY' ) {
-        for my $c ( @{$response->{Response}->{OperationResponse}->{Notes}->{Note}} ) {
+    if ( ref $response->{Notes}->{Note} eq 'ARRAY' ) {
+        for my $c ( @{$response->{Notes}->{Note}} ) {
             my %n = ();
     
             $c->{TimeStamp} =~ /(.*) \+0\d00/;
@@ -1569,7 +1915,7 @@ sub case_search {
     }
     else {
         my %n = ();
-        my $c = $response->{Response}->{OperationResponse}->{Notes}->{Note};
+        my $c = $response->{Notes}->{Note};
         $c->{TimeStamp} =~ /(.*) \+0\d00/;
         my $t = Time::Piece->strptime($1, "%a, %d %b %Y %H:%M:%S");
         $n{description} = $c->{Text};
@@ -1607,6 +1953,11 @@ sub _get_ref_from_telephone {
 
     my %adsl = $self->adslaccount( "telephone" => $cli );
     return $adsl{adslaccount}->{ourref};
+}
+
+sub _debug_dump {
+    use Data::Dumper;
+    warn Dumper \$_[1];
 }
 
 1;

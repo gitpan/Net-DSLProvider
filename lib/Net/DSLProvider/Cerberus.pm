@@ -1,6 +1,8 @@
 package Net::DSLProvider::Cerberus;
+use strict;
 use base 'Net::DSLProvider';
 use Net::DSLProvider::Cerberus::soap;
+use Carp;
 use Time::Piece;
 use Time::Seconds;
 use Date::Holidays::EnglandWales;
@@ -34,7 +36,7 @@ sub _call {
     Net::DSLProvider::Cerberus::soap->$method(@args, $self->_credentials);
 }
 
-sub make_request {
+sub _make_request {
     my ($self, $method, %args) = @_;
 
     my @args = ();
@@ -52,6 +54,12 @@ sub make_request {
     return $resp;
 }
 
+=head2 order
+
+Place an order. See the Cerberus docs for details of required params
+
+=cut
+
 sub order {
     my ($self, %args) = @_;
 
@@ -62,7 +70,7 @@ sub order {
         inst-id ip-id maint-id serv-id del-pref contract devices
         ripe-justification skip-line-check /);
 
-    my %resp = $self->make_request("Wssubmitorder", %args);
+    my %resp = $self->_make_request("Wssubmitorder", %args);
     return unless $resp->{Xml_order_submission_dsl}->{Xml_Result} == 1;
     return 1;
 }
@@ -103,7 +111,7 @@ sub cease {
         $args{crd} = $d->strftime("%d/%m/%Y");
     }
 
-    my %resp = $self->make_request("Wsrequestcancellation", %args);
+    my %resp = $self->_make_request("Wsrequestcancellation", %args);
 
     my $result = $resp->{Xml_cancellations}->{A_Result};
     if ( $result == 11 ) {
@@ -156,7 +164,7 @@ sub request_mac {
     my ($self, %args) = @_;
     $self->_check_params(\%args, qw/cli/);
 
-    my %resp = $self->make_request("Wsrequestmac", %args);
+    my %resp = $self->_make_request("Wsrequestmac", %args);
 
     my $result = $resp->{Xml_cancellations}->{A_Result};
     my %rv = ();
@@ -195,7 +203,7 @@ sub interleaving {
     my ($self, %args) = @_;
     $self->_check_params(\%args, qw/cli interleave-code snr-code/);
 
-    my %resp = $self->make_request("Wsupdateprofile", %args);
+    my %resp = $self->_make_request("Wsupdateprofile", %args);
 
     my $result = $resp->{Xml_update_profile}->{ResultCode};
     croak "Cannot change interleaving" if $result > 1;
@@ -257,7 +265,7 @@ sub service_view {
 
     # my %input = $self->convert_input(%args);
 
-    my $resp = $self->make_request("Wsfinddslline", %args);
+    my $resp = $self->_make_request("Wsfinddslline", %args);
 
     return %{$resp->{Xml_DSLLines}};
 }
